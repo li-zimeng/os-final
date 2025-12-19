@@ -1,3 +1,6 @@
+VPATH += user_threading_library_core/tests
+VPATH += user_threading_library_core/src
+
 OBJS = \
 	bio.o\
 	console.o\
@@ -76,7 +79,12 @@ AS = $(TOOLPREFIX)gas
 LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
+CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -Wno-infinite-recursion -Wno-array-bounds
+
+CFLAGS += -fno-stack-protector
+CFLAGS += -I.
+CFLAGS += -Iuser_threading_library_core/src
+
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
 # FreeBSD ld wants ``elf_i386_fbsd''
@@ -145,6 +153,70 @@ vectors.S: vectors.pl
 
 ULIB = ulib.o usys.o printf.o umalloc.o
 
+#2/3
+UTHREAD_LIB = \
+	user_threading_library_core/src/uthreads.o \
+	user_threading_library_core/src/uthreads_swtch.o \
+	user_threading_library_core/src/uthreads_mutex.o\
+	user_threading_library_core/src/uthreads_channel.o\
+	user_threading_library_core/src/uthreads_rwlock.o\
+
+#3/3
+# _t_basic: t_basic.o $(ULIB) $(UTHREAD_LIB)
+# 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+# 	$(OBJDUMP) -S $@ > t_basic.asm
+# 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_basic.sym
+
+# _t_mutex: t_mutex.o $(ULIB) $(UTHREAD_LIB)
+# 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+# 	$(OBJDUMP) -S $@ > t_mutex.asm
+# 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_mutex.sym
+
+_t_counter: t_counter.o $(ULIB) $(UTHREAD_LIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > t_counter.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_counter.sym
+
+# _t_sem: t_sem.o $(ULIB) $(UTHREAD_LIB)
+# 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+# 	$(OBJDUMP) -S $@ > t_sem.asm
+# 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_sem.sym
+
+# _t_cond: t_cond.o $(ULIB) $(UTHREAD_LIB)
+# 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+# 	$(OBJDUMP) -S $@ > t_cond.asm
+# 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_cond.sym
+
+# _t_channel: t_channel.o $(ULIB) $(UTHREAD_LIB)
+# 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+# 	$(OBJDUMP) -S $@ > t_channel.asm
+# 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_channel.sym
+
+_t_pc_sem: t_pc_sem.o $(ULIB) $(UTHREAD_LIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > t_pc_sem.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_pc_sem.sym
+
+_t_pc_channel: t_pc_channel.o $(ULIB) $(UTHREAD_LIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > t_pc_channel.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_pc_channel.sym
+
+_t_rw: t_rw.o $(ULIB) $(UTHREAD_LIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > t_rw.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_rw.sym
+
+_t_file_pc: t_file_pc.o $(ULIB) $(UTHREAD_LIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+	$(OBJDUMP) -S $@ > t_file_pc.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > t_file_pc.sym
+
+# _t_%: %.o $(ULIB) $(UTHREAD_LIB)
+# 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+# 	$(OBJDUMP) -S $@ > $*.asm
+# 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $*.sym
+
 _%: %.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
 	$(OBJDUMP) -S $@ > $*.asm
@@ -182,8 +254,22 @@ UPROGS=\
 	_wc\
 	_zombie\
 
-fs.img: mkfs README $(UPROGS)
-	./mkfs fs.img README $(UPROGS)
+#1/3
+TUPROGS=\
+    _t_counter\
+	_t_pc_sem\
+	_t_pc_channel\
+	_t_rw\
+	_t_file_pc\
+
+ # 	_t_basic\
+ # 	_t_mutex\
+ # 	_t_sem\
+ # 	_t_cond\
+ # 	_t_channel\
+
+fs.img: mkfs README $(UPROGS) $(TUPROGS)
+	./mkfs fs.img README $(UPROGS) $(TUPROGS)
 
 -include *.d
 
