@@ -475,6 +475,8 @@ This property ensures:
 
 ### Part 2
 
+
+
 #### 2.3 Sleep / Wakeup Mechanism
 
 Thread sleeping and waking are implemented entirely in user space by manipulating thread states and invoking the cooperative scheduler. There is no kernel support, no interrupts, and no preemption.
@@ -1430,6 +1432,8 @@ All concurrency control is internal to the channel implementation.
 
 ### Part 3
 
+
+
 #### 2.10 Producer–Consumer Problem
 
 - Producers generate fixed number of items
@@ -1750,18 +1754,403 @@ This guarantees:
 
 
 
-
-
 ### Part 4
 
-2.12 Thread-Safe File I/O
-
- 
-
-## 3 key design
-
-3.1 key design choices for your implementations, rationale
 
 
+#### 2.11 Thread-Safe File I/O
 
-3.2 how you used primitives to solve the problems 
+##### 2.11.1 Problem Context
+
+In xv6, file system operations (`read`, `write`) are blocking system calls.
+In a user-level threading library, a blocking syscall blocks the entire process, not just the calling thread.
+
+Therefore, true asynchronous file I/O cannot be implemented transparently without kernel support.
+This section instead demonstrates safe coordination of file-based communication between threads using synchronization primitives, while respecting xv6’s blocking semantics.
+
+##### 2.11.2 Design Approach
+
+We implement Producer–Consumer through a shared file:
+
+* The file acts as an unbounded append-only buffer
+* Producers append data using `write`
+* Consumers read data using `read`
+* Synchronization is handled entirely in user space
+* No circular buffer or in-memory queue is used
+
+This demonstrates:
+
+* Safe coordination across blocking I/O
+* Correct ordering and completeness
+* Integration of threads with OS-level file APIs
+
+##### 2.11.3 Shared Resources
+
+```c
+int fd;
+int produced;
+int consumed;
+```
+
+Synchronization primitives:
+
+```c
+mutex_t file_lock;
+mutex_t count_lock;
+cond_t can_read;
+```
+
+* `file_lock`: serializes file access
+* `count_lock`: protects counters
+* `can_read`: signals consumers when new data is available
+
+##### 2.11.4 Producer Logic
+
+```c
+void *producer(void *arg) {
+    for (int i = 0; i < N; i++) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "item %d\n", i);
+
+        mutex_lock(&file_lock);
+        write(fd, buf, strlen(buf));
+        mutex_unlock(&file_lock);
+
+        mutex_lock(&count_lock);
+        produced++;
+        cond_signal(&can_read);
+        mutex_unlock(&count_lock);
+
+        thread_yield();
+    }
+    return 0;
+}
+```
+
+Key points:
+
+* File writes are serialized using `file_lock`
+* Each write appends a complete record
+* Producer signals consumers after each successful write
+* `thread_yield()` ensures interleaving for demonstration
+
+##### 2.11.5 Consumer Logic
+
+```c
+void *consumer(void *arg) {
+    char buf[32];
+
+    while (1) {
+        mutex_lock(&count_lock);
+        while (consumed >= produced) {
+            cond_wait(&can_read, &count_lock);
+        }
+        mutex_unlock(&count_lock);
+
+        mutex_lock(&file_lock);
+        int n = read(fd, buf, sizeof(buf));
+        mutex_unlock(&file_lock);
+
+        if (n <= 0)
+            break;
+
+        write(1, buf, n);
+
+        mutex_lock(&count_lock);
+        consumed++;
+        mutex_unlock(&count_lock);
+
+        thread_yield();
+    }
+    return 0;
+}
+```
+
+Key points:
+
+* Consumers block using condition variables instead of busy waiting
+* File reads are serialized
+* Consumers only proceed when producers have written new data
+* No data loss or duplication occurs
+
+##### 2.11.6 Asynchronous Semantics in User Space
+
+Although `read` and `write` are blocking:
+
+* Threads cooperate explicitly
+* Blocking is avoided by:
+
+  * separating I/O from synchronization
+  * ensuring threads only enter I/O when safe
+* This achieves logical asynchrony, not kernel-level asynchrony
+
+##### 2.11.7 Observed Behavior
+
+* Producers and consumers interleave correctly
+* Output ordering may interleave at character granularity due to console writes
+* All produced items are eventually consumed
+* No deadlocks or missed data occur
+
+
+
+### 3 How the Primitives Were Used to Solve the Problems
+#### 3.1 Mutual Exclusion: Protecting Critical Sections
+
+**Primitive used**
+
+* `mutex_t`
+
+**Usage**
+
+* Mutexes were used to guard shared data structures accessed by multiple threads:
+
+  * Shared counters
+  * Bounded buffers
+  * File descriptors and file offsets
+  * Reader–writer state variables
+
+**Mechanism**
+
+* Threads attempting to enter a critical section call `mutex_lock`
+* If the mutex is held, the thread transitions to `T_SLEEPING` and is enqueued
+* `mutex_unlock` wakes exactly one waiting thread or releases the lock
+
+**Why mutexes are required**
+
+* Prevents concurrent writes to shared memory
+* Eliminates race conditions caused by interleaved execution at yield points
+* Provides exclusive access without busy waiting
+
+#### 3.2 Shared Counter Problem
+
+**Without synchronization**
+
+* Multiple threads increment a shared integer
+* Operations `load → increment → store` interleave
+* Lost updates occur
+
+**With mutex**
+
+* Counter increments are enclosed in `mutex_lock / mutex_unlock`
+* Only one thread modifies the counter at a time
+* Final value matches expected total
+
+**Primitive used**
+
+* `mutex_t`
+
+**What this demonstrates**
+
+* Correctness of mutex implementation
+* Observable race condition prevention
+
+#### 3.3 Producer–Consumer with Semaphores
+
+**Primitives used**
+
+* `sem_t` (counting semaphores)
+* `mutex_t`
+
+**Semaphores**
+
+* `empty`: tracks available buffer slots
+* `full`: tracks available items
+
+**Mutex**
+
+* Protects buffer indices and data
+
+**Mechanism**
+
+* Producers:
+
+  1. `sem_wait(empty)`
+  2. `mutex_lock`
+  3. write to buffer
+  4. `mutex_unlock`
+  5. `sem_post(full)`
+
+* Consumers:
+
+  1. `sem_wait(full)`
+  2. `mutex_lock`
+  3. read from buffer
+  4. `mutex_unlock`
+  5. `sem_post(empty)`
+
+**Why semaphores are needed**
+
+* Prevent lost wakeups
+* Encode resource availability directly
+* Avoid polling or manual condition tracking
+
+#### 3.4 Producer–Consumer with Channels
+
+**Primitive used**
+
+* `channel_t`
+
+**Internal composition**
+
+* One mutex
+* Two condition variables (`not_empty`, `not_full`)
+* Circular buffer
+
+**Mechanism**
+
+* Producers block automatically when the channel is full
+* Consumers block automatically when the channel is empty
+* Channel close wakes all blocked threads
+
+**Why channels simplify the problem**
+
+* No explicit buffer or index management in user code
+* No separate semaphores or mutexes required
+* Synchronization is entirely encapsulated
+
+#### 3.5 Condition Variables for Coordination
+
+**Primitive used**
+
+* `cond_t` with `mutex_t`
+
+**Usage**
+
+* Used when threads must wait for logical conditions rather than resource counts:
+
+  * Buffer state transitions
+  * Reader–writer coordination
+  * Channel signaling
+
+**Mechanism**
+
+* Waiting thread:
+
+  * releases mutex
+  * sleeps on condition queue
+* Signaling thread:
+
+  * wakes one or all waiting threads
+* Mutex is re-acquired before returning
+
+**What this enables**
+
+* Fine-grained coordination
+* No busy waiting
+* Precise wakeup semantics
+
+#### 3.6 Reader–Writer Lock with Writer Priority
+
+**Primitives used**
+
+* `mutex_t`
+* `cond_t`
+
+**State protected by mutex**
+
+* active readers count
+* active writer flag
+* waiting writers count
+
+**Writer priority enforcement**
+
+* Readers block if any writer is waiting
+* Writers wait until no readers or writers are active
+* Last reader wakes a writer
+* Writer completion wakes next writer or all readers
+
+**Why condition variables are required**
+
+* Multiple distinct waiting conditions
+* Selective wakeup policy
+* Avoids writer starvation
+
+#### 3.7 Channels as Message-Passing Abstraction
+
+**Primitive used**
+
+* `channel_t`
+
+**Usage**
+
+* Thread-to-thread communication without shared memory
+* Used for:
+
+  * Producer–consumer
+  * Pipeline-style workflows
+
+**Mechanism**
+
+* Threads block on send/receive automatically
+* Buffering and wakeups handled internally
+* Channel close propagates termination
+
+**Benefit**
+
+* Eliminates explicit locking from application logic
+* Demonstrates composition of primitives
+
+#### 3.8 Thread-Safe File I/O
+
+**Primitives used**
+
+* `mutex_t`
+* `cond_t`
+
+**Problem**
+
+* xv6 file system calls block the entire process
+* User-level threads cannot rely on kernel async I/O
+
+**Solution**
+
+* Serialize file access with mutex
+* Coordinate producer and consumer using condition variables
+* Ensure file offset consistency
+
+**What this demonstrates**
+
+* Limits of user-level threading
+* Safe coordination around blocking syscalls
+* Correctness over performance
+
+#### 3.9 Summary of Primitive Usage Mapping
+
+| Problem                         | Primitives Used             |
+| ------------------------------- | --------------------------- |
+| Shared counter                  | Mutex                       |
+| Producer–consumer               | Semaphores + Mutex          |
+| Producer–consumer (alt)         | Channel                     |
+| Reader–writer (writer priority) | Mutex + Condition Variables |
+| Message passing                 | Channel                     |
+| File-based producer–consumer    | Mutex + Condition Variables |
+
+
+
+### 4 Summary
+
+This project implements a complete user-level threading and synchronization library on top of xv6, progressively building from low-level execution mechanisms to higher-level concurrency abstractions and real-world synchronization problems.
+
+At the core, the system provides:
+
+* A fixed-size thread table with explicit thread states
+* Per-thread stacks and a deterministic context switching mechanism
+* A cooperative round-robin scheduler implemented entirely in user space
+
+On top of this foundation, the library implements a full set of synchronization primitives:
+
+* Mutexes for mutual exclusion and critical section protection
+* Semaphores for resource counting and blocking coordination
+* Condition variables for predicate-based waiting and signaling
+* Channels as a higher-level message-passing abstraction built from mutexes and condition variables
+
+These primitives were validated through classical concurrency problems:
+
+* Shared counter race conditions
+* Producer–consumer with both semaphores and channels
+* Reader–writer synchronization with writer priority
+* Message passing with bounded buffers
+* Thread-safe file I/O in the presence of blocking system calls
+
+All synchronization is implemented using sleep–wakeup semantics integrated with the thread scheduler, without busy waiting or kernel modification. Blocking is achieved by transitioning threads to `T_SLEEPING` and resuming them via explicit wakeups, ensuring correctness under cooperative scheduling.
+
